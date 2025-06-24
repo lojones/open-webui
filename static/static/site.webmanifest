@@ -1,6 +1,6 @@
 {
-  "name": "Open WebUI",
-  "short_name": "WebUI",
+  "name": "LojoAI",
+  "short_name": "LojoAI",
   "icons": [
     {
       "src": "/static/web-app-manifest-192x192.png",
