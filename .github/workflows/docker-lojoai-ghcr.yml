@@ -2,7 +2,7 @@ name: Build and Push LojoAI Docker Image to GHCR
 
 on:
   push:
-    branches: [ main ]
+    branches: [ lojoai-customization ]
   workflow_dispatch:
 
 jobs:
