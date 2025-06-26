@@ -139,7 +139,7 @@
 				</div>
 
 				<div
-					class=" text-3xl @sm:text-3xl line-clamp-1 flex items-center"
+					class=" text-xl @sm:text-xl line-clamp-1 flex items-center"
 					in:fade={{ duration: 100 }}
 				>
 					{#if models[selectedModelIdx]?.name}
