@@ -1,0 +1,148 @@
+name: Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  RESOURCE_GROUP: lojoweb-rg
+  LOCATION: eastus
+  APP_NAME: openwebui-app3
+  ENV_NAME: openwebui-env3
+  LAW_NAME: openwebui-law
+  IMAGE: ghcr.io/lojones/open-webui:latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure CLI Container Apps extension
+        run: |
+          az extension add --name containerapp --upgrade --yes
+          az provider register --namespace Microsoft.App
+          az provider register --namespace Microsoft.OperationalInsights
+
+      - name: Create or verify Log Analytics workspace
+        run: |
+          if ! az monitor log-analytics workspace show -g ${{ env.RESOURCE_GROUP }} -n ${{ env.LAW_NAME }} --query id -o tsv 2>/dev/null; then
+            echo "Creating Log Analytics workspace..."
+            az monitor log-analytics workspace create \
+              -g ${{ env.RESOURCE_GROUP }} \
+              -n ${{ env.LAW_NAME }} \
+              -l ${{ env.LOCATION }}
+          fi
+          
+          # Export workspace details for later use
+          echo "LAW_ID=$(az monitor log-analytics workspace show -g ${{ env.RESOURCE_GROUP }} -n ${{ env.LAW_NAME }} --query customerId -o tsv)" >> $GITHUB_ENV
+          echo "LAW_KEY=$(az monitor log-analytics workspace get-shared-keys -g ${{ env.RESOURCE_GROUP }} -n ${{ env.LAW_NAME }} --query primarySharedKey -o tsv)" >> $GITHUB_ENV
+
+      - name: Create or verify Container Apps environment
+        run: |
+          if ! az containerapp env show -g ${{ env.RESOURCE_GROUP }} -n ${{ env.ENV_NAME }} --query id -o tsv 2>/dev/null; then
+            echo "Creating Container Apps environment..."
+            az containerapp env create \
+              -g ${{ env.RESOURCE_GROUP }} \
+              -n ${{ env.ENV_NAME }} \
+              -l ${{ env.LOCATION }} \
+              --logs-workspace-id ${{ env.LAW_ID }} \
+              --logs-workspace-key ${{ env.LAW_KEY }}
+          fi
+
+      - name: Build database connection string
+        run: |
+          # Build the DSN from secrets
+          DSN="postgresql://${{ secrets.SUPABASE_USER }}:${{ secrets.SUPABASE_PASSWORD }}@${{ secrets.SUPABASE_HOST }}:${{ secrets.SUPABASE_PORT }}/${{ secrets.SUPABASE_DATABASE }}?sslmode=require"
+          echo "DATABASE_URL=$DSN" >> $GITHUB_ENV
+
+      - name: Deploy or update Container App
+        run: |
+          # Check if app exists
+          if ! az containerapp show -g ${{ env.RESOURCE_GROUP }} -n ${{ env.APP_NAME }} --query id -o tsv 2>/dev/null; then
+            echo "Creating new Container App..."
+            az containerapp create \
+              -g ${{ env.RESOURCE_GROUP }} \
+              -n ${{ env.APP_NAME }} \
+              -e ${{ env.ENV_NAME }} \
+              --image ${{ env.IMAGE }} \
+              --target-port 8080 \
+              --ingress external \
+              --env-vars \
+                DATABASE_URL=secretref:database-url \
+                RAG_EMBEDDING_ENGINE=openai \
+                AUDIO_STT_ENGINE=openai \
+                DATABASE_POOL_SIZE=10 \
+                DATABASE_POOL_MAX_OVERFLOW=20 \
+                AIOHTTP_CLIENT_TIMEOUT=900 \
+              --secrets database-url="${{ env.DATABASE_URL }}" \
+              --min-replicas 1 \
+              --max-replicas 1 \
+              --cpu 1 \
+              --memory 2Gi
+          else
+            echo "Updating existing Container App..."
+            REVISION_SUFFIX="rev-$(date +%Y%m%d-%H%M%S)"
+            az containerapp update \
+              -g ${{ env.RESOURCE_GROUP }} \
+              -n ${{ env.APP_NAME }} \
+              --image ${{ env.IMAGE }} \
+              --set-env-vars \
+                DATABASE_URL=secretref:database-url \
+                RAG_EMBEDDING_ENGINE=openai \
+                AUDIO_STT_ENGINE=openai \
+                DATABASE_POOL_SIZE=10 \
+                DATABASE_POOL_MAX_OVERFLOW=20 \
+                AIOHTTP_CLIENT_TIMEOUT=900 \
+              --replace-secrets database-url="${{ env.DATABASE_URL }}" \
+              --revision-suffix $REVISION_SUFFIX
+          fi
+
+      - name: Set single revision mode
+        run: |
+          az containerapp revision set-mode \
+            -g ${{ env.RESOURCE_GROUP }} \
+            -n ${{ env.APP_NAME }} \
+            --mode single
+
+      - name: Get deployment URL
+        run: |
+          URL=$(az containerapp show -g ${{ env.RESOURCE_GROUP }} -n ${{ env.APP_NAME }} --query properties.configuration.ingress.fqdn -o tsv)
+          echo "🚀 Deployment complete!"
+          echo "📍 Application URL: https://$URL"
+          echo "⏳ Please allow ~60 seconds for the application to fully initialize"
+          
+          # Output URL as a job output for other workflows/notifications
+          echo "app_url=https://$URL" >> $GITHUB_OUTPUT
+        id: deployment
+
+      - name: Post deployment notification
+        if: success()
+        run: |
+          echo "✅ Successfully deployed Open WebUI to Azure Container Apps"
+          echo "🔗 Access your application at: ${{ steps.deployment.outputs.app_url }}"
