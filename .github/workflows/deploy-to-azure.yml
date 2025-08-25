@@ -125,6 +125,14 @@ jobs:
           else
             echo "Updating existing Container App..."
             REVISION_SUFFIX="rev-$(date +%Y%m%d-%H%M%S)"
+            
+            # First update the secret
+            az containerapp secret set \
+              -g ${{ env.RESOURCE_GROUP }} \
+              -n ${{ env.APP_NAME }} \
+              --secrets database-url="${{ env.DATABASE_URL }}"
+            
+            # Then update the container app
             az containerapp update \
               -g ${{ env.RESOURCE_GROUP }} \
               -n ${{ env.APP_NAME }} \
@@ -136,7 +144,6 @@ jobs:
                 DATABASE_POOL_SIZE=10 \
                 DATABASE_POOL_MAX_OVERFLOW=20 \
                 AIOHTTP_CLIENT_TIMEOUT=900 \
-              --replace-secrets database-url="${{ env.DATABASE_URL }}" \
               --revision-suffix $REVISION_SUFFIX
           fi
 
