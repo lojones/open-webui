@@ -46,8 +46,25 @@ jobs:
       - name: Install Azure CLI Container Apps extension
         run: |
           az extension add --name containerapp --upgrade --yes
-          az provider register --namespace Microsoft.App
-          az provider register --namespace Microsoft.OperationalInsights
+          
+          # Check if providers are registered (skip registration if already done)
+          echo "Checking resource provider registration status..."
+          
+          APP_PROVIDER_STATE=$(az provider show --namespace Microsoft.App --query "registrationState" -o tsv)
+          if [ "$APP_PROVIDER_STATE" != "Registered" ]; then
+            echo "Note: Microsoft.App provider is not registered. This requires subscription-level permissions."
+            echo "Please ensure it's registered in your subscription before running this workflow."
+          else
+            echo "✓ Microsoft.App provider is already registered"
+          fi
+          
+          LOGS_PROVIDER_STATE=$(az provider show --namespace Microsoft.OperationalInsights --query "registrationState" -o tsv)
+          if [ "$LOGS_PROVIDER_STATE" != "Registered" ]; then
+            echo "Note: Microsoft.OperationalInsights provider is not registered. This requires subscription-level permissions."
+            echo "Please ensure it's registered in your subscription before running this workflow."
+          else
+            echo "✓ Microsoft.OperationalInsights provider is already registered"
+          fi
 
       - name: Create or verify Log Analytics workspace
         run: |
