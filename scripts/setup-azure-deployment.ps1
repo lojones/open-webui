@@ -105,23 +105,42 @@ Log "Configuring GitHub OIDC federation..."
 # Check existing federated credentials
 $existingCreds = az ad app federated-credential list --id $appId --query "[].name" -o tsv 2>$null
 
-# Production environment (main branch)
-if ($existingCreds -contains "github-deploy-prod") {
-    Log "Production federated credential already exists" -Level "SUCCESS"
+# Production environment
+if ($existingCreds -contains "github-deploy-prod-env") {
+    Log "Production environment federated credential already exists" -Level "SUCCESS"
 } else {
-    $prodCredential = @{
-        name = "github-deploy-prod"
+    $prodEnvCredential = @{
+        name = "github-deploy-prod-env"
+        issuer = "https://token.actions.githubusercontent.com"
+        subject = "repo:${GitHubOrg}/${GitHubRepo}:environment:production"
+        audiences = @("api://AzureADTokenExchange")
+    } | ConvertTo-Json
+
+    $prodEnvCredFile = New-TemporaryFile
+    $prodEnvCredential | Out-File -FilePath $prodEnvCredFile.FullName -Encoding UTF8
+
+    az ad app federated-credential create --id $appId --parameters $prodEnvCredFile.FullName 2>$null | Out-Null
+    Remove-Item $prodEnvCredFile.FullName
+    Log "Production environment federated credential created" -Level "SUCCESS"
+}
+
+# Main branch credential (for pushes without environment)
+if ($existingCreds -contains "github-deploy-main") {
+    Log "Main branch federated credential already exists" -Level "SUCCESS"
+} else {
+    $mainCredential = @{
+        name = "github-deploy-main"
         issuer = "https://token.actions.githubusercontent.com"
         subject = "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
         audiences = @("api://AzureADTokenExchange")
     } | ConvertTo-Json
 
-    $prodCredFile = New-TemporaryFile
-    $prodCredential | Out-File -FilePath $prodCredFile.FullName -Encoding UTF8
+    $mainCredFile = New-TemporaryFile
+    $mainCredential | Out-File -FilePath $mainCredFile.FullName -Encoding UTF8
 
-    az ad app federated-credential create --id $appId --parameters $prodCredFile.FullName 2>$null | Out-Null
-    Remove-Item $prodCredFile.FullName
-    Log "Production federated credential created" -Level "SUCCESS"
+    az ad app federated-credential create --id $appId --parameters $mainCredFile.FullName 2>$null | Out-Null
+    Remove-Item $mainCredFile.FullName
+    Log "Main branch federated credential created" -Level "SUCCESS"
 }
 
 # Staging environment (for manual deployments)
@@ -188,9 +207,10 @@ Log "Supabase Configuration"
 Write-Host ""
 Write-Host "Do you want to set new Supabase secrets or use existing ones?" -ForegroundColor Cyan
 Write-Host "1) Set new secrets" -ForegroundColor White
-Write-Host "2) Use existing secrets" -ForegroundColor White
+Write-Host "2) Use existing secrets (with verification)" -ForegroundColor White
+Write-Host "3) Skip Supabase configuration (secrets already exist)" -ForegroundColor White
 Write-Host ""
-$secretsChoice = Read-Host "Enter your choice (1 or 2)"
+$secretsChoice = Read-Host "Enter your choice (1, 2, or 3)"
 
 if ($secretsChoice -eq "1") {
     # Prompt for Supabase credentials
@@ -235,18 +255,32 @@ if ($secretsChoice -eq "1") {
     $supabasePasswordPlain | gh secret set SUPABASE_PASSWORD --repo "${GitHubOrg}/${GitHubRepo}"
 
     Log "Supabase secrets configured" -Level "SUCCESS"
-} else {
+} elseif ($secretsChoice -eq "2") {
     Log "Using existing Supabase secrets from repository" -Level "SUCCESS"
     
     # Verify that secrets exist
     Log "Verifying Supabase secrets exist..."
-    $secretsList = gh secret list --repo "${GitHubOrg}/${GitHubRepo}" 2>&1
+    
+    # Get the list of secrets as JSON for more reliable parsing
+    try {
+        $secretsJson = gh api repos/${GitHubOrg}/${GitHubRepo}/actions/secrets --jq '.secrets[].name' 2>$null
+        $existingSecrets = $secretsJson -split "`n" | Where-Object { $_ -ne "" }
+    } catch {
+        # Fallback to gh secret list if API fails
+        $secretsList = gh secret list --repo "${GitHubOrg}/${GitHubRepo}" 2>$null
+        $existingSecrets = @()
+        foreach ($line in ($secretsList -split "`n")) {
+            if ($line -match "^(\S+)\s+") {
+                $existingSecrets += $matches[1]
+            }
+        }
+    }
     
     $requiredSecrets = @("SUPABASE_HOST", "SUPABASE_PORT", "SUPABASE_USER", "SUPABASE_DATABASE", "SUPABASE_PASSWORD")
     $missingSecrets = @()
     
     foreach ($secret in $requiredSecrets) {
-        if ($secretsList -notmatch $secret) {
+        if ($existingSecrets -notcontains $secret) {
             $missingSecrets += $secret
         }
     }
@@ -258,6 +292,8 @@ if ($secretsChoice -eq "1") {
     }
     
     Log "All required Supabase secrets found" -Level "SUCCESS"
+} else {
+    Log "Skipping Supabase configuration - assuming secrets are already configured" -Level "SUCCESS"
 }
 
 # Create environments in GitHub
@@ -314,8 +350,10 @@ Write-Host "  Repository: ${GitHubOrg}/${GitHubRepo}" -ForegroundColor White
 Write-Host "  Environments: production, staging" -ForegroundColor White
 if ($secretsChoice -eq "1") {
     Write-Host "  Secrets: Newly configured" -ForegroundColor White
+} elseif ($secretsChoice -eq "2") {
+    Write-Host "  Secrets: Verified existing" -ForegroundColor White
 } else {
-    Write-Host "  Secrets: Using existing" -ForegroundColor White
+    Write-Host "  Secrets: Skipped verification" -ForegroundColor White
 }
 Write-Host ""
 Write-Host "Next Steps:" -ForegroundColor Yellow
